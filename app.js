@@ -6,6 +6,17 @@
   const AIR_TYPES = new Set(['Fighter', 'Corvette']);
   const TYPES = ['Frigate','Destroyer','Cruiser','Battlecruiser','Carrier','Fighter','Corvette'];
   const ROWS = ['Front','Middle','Back','Aircraft'];
+  // Published maximum ship counts, not the player's live base availability.
+  // Only documented models are included; other entries remain estimates.
+  const PUBLISHED_SERVICE_LIMITS = Object.freeze({
+    'AC721': 15,
+    'Ceres': 10,
+    'Taurus': 10,
+    'Eris I': 10,
+    'Winged Hussar': 10
+  });
+  const publishedServiceLimit = ship => Object.prototype.hasOwnProperty.call(PUBLISHED_SERVICE_LIMITS,ship.name) ? PUBLISHED_SERVICE_LIMITS[ship.name] : null;
+  const suggestedQuantity = ship => publishedServiceLimit(ship) ?? int(ship.qty,1,0,99);
   const CONFIG = {
     offensive: {label:'OFFENSIVE STRIKE', w:{atk:5,tank:1.35,aa:1.15,support:.7}},
     balanced: {label:'BALANCED OPERATIONS', w:{atk:3,tank:2.8,aa:2.0,support:1.6}},
@@ -200,6 +211,7 @@
 
   function cardForShip(s){
     const open=expandedStats.has(s.id);
+    const serviceLimit=publishedServiceLimit(s);
     const measures=[['CP cost',s.cp],['Battle row',s.row],['Attack',`${s.atk}/5`],['Defense',`${s.tank}/5`],['Anti-air',`${s.aa}/5`],['Support',`${s.support}/5`],['Fighter slots',s.fighterSlots],['Large fighter slots',s.largeFighterSlots],['Corvette slots',s.corvetteSlots],['Aircraft size',isAir(s)?s.size:'N/A']];
     return `<article class="inventory-row ${s.owned?'is-owned':'not-owned'}">
       <div class="inventory-line">
@@ -210,7 +222,7 @@
       <div class="inventory-detail-body" id="inventory-body-${esc(s.id)}" ${open?'':'hidden'}>
         <div class="ship-metrics" aria-label="Stats for ${esc(shipName(s))}">
           ${measures.map(([label,value])=>`<div class="ship-metric"><small>${label}</small><strong>${esc(value)}</strong></div>`).join('')}
-          <div class="ship-metric quantity-metric"><label for="quantity-${esc(s.id)}">Available copies</label><input id="quantity-${esc(s.id)}" type="number" min="0" max="99" value="${s.qty}" data-quantity-id="${esc(s.id)}"></div>
+          <div class="ship-metric quantity-metric"><label for="quantity-${esc(s.id)}">Available ships</label><input id="quantity-${esc(s.id)}" type="number" min="0" max="99" value="${s.qty}" data-quantity-id="${esc(s.id)}">${serviceLimit==null?`<small>Planning estimate. Verify the number in your game.</small>`:`<small>Published maximum in service: ${serviceLimit} (not live base count)</small><button type="button" class="inventory-expand-button" data-apply-limit-id="${esc(s.id)}">Use ${serviceLimit}</button>`}</div>
         </div>
         ${s.notes?`<p class="ship-note">${esc(s.notes)}</p>`:''}
         <p class="stats-caveat">Role ratings are planning estimates, not verified game statistics.</p>
@@ -338,13 +350,18 @@
     const s=blueprintCatalog.find(x=>x.id===$('#catalog-variant').value);
     if(!s){$('#catalog-preview').textContent='Choose a variant to view its preloaded statistics.';return;}
     const existing=state.ships.find(x=>familyKey(x)===familyKey(s)&&x.variant.toLowerCase()===s.variant.toLowerCase());
-    $('#catalog-copies').value=existing?existing.qty:1;
+    const serviceLimit=publishedServiceLimit(s);
+    $('#catalog-copies').value=existing?existing.qty:suggestedQuantity(s);
     $('#catalog-owned').checked=true;
     $('#catalog-preview').innerHTML=`<strong>${esc(shipName(s))}</strong><div class="catalog-preview-facts"><span>${esc(s.type)}</span><span>${esc(s.row)} row</span><span>CP ${s.cp}</span><span>Attack ${s.atk}/5</span><span>Defense ${s.tank}/5</span><span>AA ${s.aa}/5</span><span>Support ${s.support}/5</span><span>Fighter slots ${s.fighterSlots}</span><span>Corvette slots ${s.corvetteSlots}</span></div><small>${existing?'Already in workspace: preserves your custom stats.':'Stats loaded from built-in catalog.'} Ratings are estimates, not official game values.</small>`;
+    $('#catalog-preview').insertAdjacentHTML('beforeend', serviceLimit==null?'<p class="stats-caveat">Available ships is an editable planning estimate. Confirm the number your base can build.</p>':`<p class="stats-caveat">Published maximum in service: <b>${serviceLimit}</b>. Not your live available-to-build count. <button type="button" class="inventory-expand-button" data-use-catalog-limit>Use ${serviceLimit}</button></p>`);
   }
   function showEditor(){
     populateCatalogShips();
-    $('#catalog-copies').value=1;$('#catalog-owned').checked=true;
+    const qtyInput=$('#catalog-copies');
+    const qtyLabel=qtyInput.closest('label');
+    if(qtyLabel && qtyLabel.firstChild && qtyLabel.firstChild.nodeType===3)qtyLabel.firstChild.textContent='Available ships';
+    qtyInput.value=1;$('#catalog-owned').checked=true;
     $('#editor-modal').showModal();
   }
   function saveEditor(e){
@@ -392,6 +409,16 @@
 
   $('#ship-grid').addEventListener('click',e=>{
     if(e.target.closest('#add-first-blueprint')){showEditor();return;}
+    const restore=e.target.closest('[data-apply-limit-id]');
+    if(restore){
+      const ship=state.ships.find(s=>s.id===restore.dataset.applyLimitId);
+      const limit=ship&&publishedServiceLimit(ship);
+      if(limit==null)return;
+      ship.qty=limit;
+      updateBlueprintAfterInlineChange(ship);
+      toast('Available ships restored to published limit. Edit to match your actual base.');
+      return;
+    }
     const btn=e.target.closest('button[data-expand-id]');if(!btn)return;
     const id=btn.dataset.expandId,body=$('.inventory-detail-body',btn.closest('.inventory-row'));
     if(expandedStats.has(id))expandedStats.delete(id);else expandedStats.add(id);
@@ -414,6 +441,12 @@
   $('#editor-form').addEventListener('submit',saveEditor);
   $('#catalog-ship').addEventListener('change',populateCatalogVariants);
   $('#catalog-variant').addEventListener('change',previewCatalogBlueprint);
+  $('#catalog-preview').addEventListener('click',e=>{
+    if(!e.target.closest('[data-use-catalog-limit]'))return;
+    const selected=blueprintCatalog.find(s=>s.id===$('#catalog-variant').value);
+    const limit=selected&&publishedServiceLimit(selected);
+    if(limit!=null)$('#catalog-copies').value=limit;
+  });
   $('#close-modal').addEventListener('click',()=>$('#editor-modal').close());
   $('#cancel-modal').addEventListener('click',()=>$('#editor-modal').close());
   $('#goto-upgrades').addEventListener('click',()=>navigate('upgrades'));$('#back-fleet').addEventListener('click',()=>navigate('fleet'));
