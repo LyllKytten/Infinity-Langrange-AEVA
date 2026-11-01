@@ -305,69 +305,181 @@
     return ship.atk*w.atk + ship.tank*w.tank + ship.aa*aaWeight + ship.support*w.support;
   }
   function shipName(ship){return ship.name + (ship.variant?` · ${ship.variant}`:'')}
-  function buildFleet(){
-    const {cp:limit}=state.settings;
-    const owned=state.ships.filter(s=>s.owned&&s.qty>0);
-    const nonAir=owned.filter(s=>!isAir(s)&&s.cp>0);
-    const availableAir=owned.filter(isAir);
-    const remaining=new Map(nonAir.map(s=>[s.id,s.qty]));
-    const roster=new Map();let spent=0, iterations=0;
-    const hasFighter=availableAir.some(s=>s.type==='Fighter');
-    const hasLargeFighter=availableAir.some(s=>s.type==='Fighter'&&s.size==='Large');
-    const hasCorvette=availableAir.some(s=>s.type==='Corvette');
-    function count(id){return roster.get(id)||0}
-    function take(ship){roster.set(ship.id,count(ship.id)+1);remaining.set(ship.id,remaining.get(ship.id)-1);spent+=ship.cp}
-    function choose(onlyFront=false){
-      let best=null,bestScore=-Infinity;
-      for(const ship of nonAir){
-        if((remaining.get(ship.id)||0)<=0||spent+ship.cp>limit)continue;
-        if(onlyFront&&ship.row!=='Front')continue;
-        let score=shipScore(ship,state.settings)/Math.pow(ship.cp,.63);
-        const current=count(ship.id);
-        score*=1/(1+current*.12); // spread the roster rather than endlessly stacking a single hull
-        if(ship.row==='Front'&&frontCp()<limit*.22)score+=2.2;
-        if(ship.aa>=4&&state.settings.airThreat)score+=1.5;
-        if(state.settings.preferAircraft){
-          const fighterFits=hasFighter&&ship.fighterSlots>0&&(!hasLargeFighter||ship.largeFighterSlots>0||availableAir.some(a=>a.type==='Fighter'&&a.size!=='Large'));
-          const corvetteFits=hasCorvette&&ship.corvetteSlots>0;
-          if(fighterFits||corvetteFits){
-            const hangarAlready=hangars();
-            const needF=Math.max(0,availableAir.filter(a=>a.type==='Fighter').reduce((n,a)=>n+a.qty,0)-hangarAlready.f);
-            const needC=Math.max(0,availableAir.filter(a=>a.type==='Corvette').reduce((n,a)=>n+a.qty,0)-hangarAlready.c);
-            if((fighterFits&&needF>0)||(corvetteFits&&needC>0))score+=4;
+  /*
+   * Fleet Architect PR #4: role-aware, multi-candidate fleet optimizer.
+   * Combat values are planning heuristics, NOT verified game damage/HP values.
+   * Keep this function dependency-free so it can be regression-tested in Node
+   * and embedded directly into the existing browser-only app.js.
+   */
+  function optimizedBuildFleet(state, shipScore) {
+    const settings = state.settings || {};
+    const limit = Math.max(0, Math.trunc(Number(settings.cp) || 0));
+    const isAir = ship => ship.type === 'Fighter' || ship.type === 'Corvette';
+    const owned = (state.ships || []).filter(s => s.owned && Number(s.qty) > 0);
+    const nonAir = owned.filter(s => !isAir(s) && Number(s.cp) > 0 &&
+      Number.isFinite(Number(s.cp)) && ['Front','Middle','Back'].includes(s.row));
+    const availableAir = owned.filter(isAir);
+    const fighterDemand = availableAir.filter(s => s.type === 'Fighter').reduce((n,s) => n + Number(s.qty), 0);
+    const largeDemand = availableAir.filter(s => s.type === 'Fighter' && s.size === 'Large').reduce((n,s) => n + Number(s.qty), 0);
+    const corvetteDemand = availableAir.filter(s => s.type === 'Corvette').reduce((n,s) => n + Number(s.qty), 0);
+
+    // Deliberately calibrated relative class factors. The catalog's 1-5
+    // ratings cannot represent real cross-class DPS or durability on their own.
+    // These factors are transparent approximations, not official power numbers.
+    const classFactors = {
+      offensive: {Frigate:1, Destroyer:1.22, Cruiser:2.95, Battlecruiser:3.55, Carrier:2.1},
+      balanced:  {Frigate:1, Destroyer:1.20, Cruiser:2.80, Battlecruiser:3.35, Carrier:2.25},
+      defensive: {Frigate:1, Destroyer:1.30, Cruiser:2.65, Battlecruiser:3.20, Carrier:2.25}
+    };
+    const mode = ['offensive','balanced','defensive'].includes(settings.strategy) ? settings.strategy : 'balanced';
+    const factors = classFactors[mode];
+    const entries = nonAir.map((ship,index) => {
+      const cp = Number(ship.cp);
+      const quantity = Math.min(99, Math.max(0, Math.floor(Number(ship.qty))));
+      const base = Math.max(0.1, Number(shipScore(ship,{...settings,strategy:mode})) || 0.1);
+      const unitPower = base * (factors[ship.type] || 1) * Math.pow(cp / 8, 0.45);
+      return {ship,index,cp,quantity,unitPower};
+    });
+    const countLimit = entries.length;
+    const canFront = entries.some(x => x.ship.row === 'Front' && x.cp <= limit && x.quantity > 0);
+    const isCapital = x => x.ship.type === 'Cruiser' || x.ship.type === 'Battlecruiser';
+    const primaryCapital = entries.filter(x => isCapital(x) && x.cp <= limit && x.quantity > 0)
+      .sort((a,b) => b.unitPower/b.cp - a.unitPower/a.cp || a.ship.id.localeCompare(b.ship.id));
+
+    function measure(counts) {
+      let spent=0,frontCp=0,quality=0,totalHulls=0,aa=0,support=0,f=0,c=0,l=0;
+      const classes=new Set();
+      let capitalHulls=0;
+      for (let i=0;i<countLimit;i++) {
+        const n=counts[i];if(!n)continue;
+        const {ship,cp,unitPower}=entries[i];
+        const cost=cp*n;
+        spent+=cost;totalHulls+=n;
+        if (ship.row==='Front')frontCp+=cost;
+        classes.add(ship.type);
+        if (isCapital(entries[i])) capitalHulls+=n;
+        // Diminishing returns prevent simply stacking 10 copies of the
+        // highest-scoring cheap frigate.
+        quality+=unitPower*Math.pow(n,0.84);
+        aa+=Math.max(0,Number(ship.aa)||0)*Math.pow(n,0.88)*Math.sqrt(cp/8);
+        support+=Math.max(0,Number(ship.support)||0)*Math.pow(n,0.88)*Math.sqrt(cp/8);
+        f+=Math.max(0,Number(ship.fighterSlots)||0)*n;
+        c+=Math.max(0,Number(ship.corvetteSlots)||0)*n;
+        l+=Math.max(0,Math.min(Number(ship.largeFighterSlots)||0,Number(ship.fighterSlots)||0))*n;
+      }
+      const assignedLarge=Math.min(largeDemand,l,f);
+      const assignedFighters=assignedLarge+Math.min(Math.max(0,f-assignedLarge),Math.max(0,fighterDemand-largeDemand));
+      const assignedCorvettes=Math.min(c,corvetteDemand);
+      const assignedAircraft=assignedFighters+assignedCorvettes;
+      // Frontline target is a soft preference. If the user owns no eligible
+      // frontline ships it is not treated as an impossible mandatory constraint.
+      const frontTarget=canFront?Math.min(limit*0.23,spent*0.26):0;
+      const frontShortfall=Math.max(0,frontTarget-frontCp);
+      const frontlinePenalty=frontShortfall*(mode==='defensive'?2.1:1.4);
+      const frontOvercommit=Math.max(0,frontCp-Math.max(limit*0.48,spent*0.55));
+      const frontOvercommitPenalty=frontOvercommit*0.52;
+      const aircraftValue=settings.preferAircraft===false?0:assignedAircraft*12;
+      const aaValue=settings.airThreat===false?Math.min(aa*0.35,25):Math.min(aa*0.98,65);
+      const supportValue=Math.min(support*(mode==='defensive'?0.9:0.48),44);
+      const diversityValue=Math.max(0,classes.size-1)*11;
+      const combatScore=quality+aircraftValue+aaValue+supportValue+diversityValue+
+        spent*0.12-frontlinePenalty-frontOvercommitPenalty;
+      return {score:combatScore,spent,frontCp,totalHulls,capitalHulls,assignedAircraft,
+        capacity:{f,c,l},classes:[...classes]};
+    }
+
+    function assemble(seed=[],excludeCapitals=false) {
+      const counts=new Uint8Array(countLimit);
+      let used=0;
+      for (const i of seed) {
+        const item=entries[i];
+        if(!item || counts[i]>=item.quantity || item.cp+used>limit)continue;
+        counts[i]++;used+=item.cp;
+      }
+      const minCp=Math.min(Infinity,...entries.filter(x=>x.quantity>0).map(x=>x.cp));
+      const maxSteps=Math.min(180,Math.ceil(limit/Math.max(1,minCp))+2);
+      for(let step=0;step<maxSteps;step++) {
+        const before=measure(counts);
+        let winner=-1,bestGain=-Infinity;
+        for(let i=0;i<countLimit;i++) {
+          const item=entries[i];
+          if(excludeCapitals && isCapital(item))continue;
+          if(counts[i]>=item.quantity || used+item.cp>limit)continue;
+          counts[i]++;
+          const after=measure(counts);
+          counts[i]--;
+          const marginal=after.score-before.score;
+          // Penalize CP only mildly. The original power / CP^0.63 formula
+          // discarded heavy-ship candidates before evaluating full fleets.
+          const gain=marginal/Math.pow(item.cp,0.72);
+          if(gain>bestGain+1e-8 || (Math.abs(gain-bestGain)<1e-8 &&
+             (winner<0 || item.ship.id<entries[winner].ship.id))) {
+            winner=i;bestGain=gain;
           }
         }
-        if(score>bestScore){best=ship;bestScore=score;}
+        if(winner<0 || bestGain<=0)break;
+        counts[winner]++;used+=entries[winner].cp;
       }
-      return best;
+      return {counts,metrics:measure(counts)};
     }
-    function frontCp(){let v=0;for(const [id,qty] of roster){const s=nonAir.find(x=>x.id===id);if(s&&s.row==='Front')v+=s.cp*qty;}return v;}
-    function hangars(){let f=0,c=0,l=0;for(const [id,qty] of roster){const s=nonAir.find(x=>x.id===id);if(!s)continue;f+=(s.fighterSlots||0)*qty;c+=(s.corvetteSlots||0)*qty;l+=Math.min(s.largeFighterSlots||0,s.fighterSlots||0)*qty;}return {f,c,l}}
-    // Reserve a reasonable frontline when any eligible front-row hulls exist.
-    while(iterations++<50&&frontCp()<limit*.18){const ship=choose(true);if(!ship)break;take(ship)}
-    // Ensure at least one suitable aircraft host if requested and affordable.
-    if(state.settings.preferAircraft&&availableAir.length){
-      const fit=nonAir.filter(s=>remaining.get(s.id)>0&&spent+s.cp<=limit&&((hasCorvette&&s.corvetteSlots>0)||(hasFighter&&s.fighterSlots>0&&(!hasLargeFighter||s.largeFighterSlots>0||availableAir.some(a=>a.type==='Fighter'&&a.size!=='Large')))));
-      const already=hangars();
-      if(!already.f&&!already.c&&fit.length){fit.sort((a,b)=>shipScore(b,state.settings)/b.cp-shipScore(a,state.settings)/a.cp);take(fit[0]);}
-    }
-    iterations=0;
-    while(iterations++<350){const ship=choose();if(!ship)break;take(ship)}
-    const hulls=[...roster].map(([id,qty])=>({ship:nonAir.find(s=>s.id===id),qty})).filter(x=>x.ship);
-    const capacity=hangars();
+
+    const seeds=[{indices:[],excludeCapitals:false},{indices:[],excludeCapitals:true}];
+    // Explicitly evaluate fleets seeded by each top heavy ship, so cruisers
+    // and battlecruisers cannot disappear purely due to greedy first picks.
+    primaryCapital.slice(0,14).forEach(x=>seeds.push({indices:[x.index],excludeCapitals:false}));
+    const bc=primaryCapital.filter(x=>x.ship.type==='Battlecruiser').slice(0,3);
+    const cru=primaryCapital.filter(x=>x.ship.type==='Cruiser').slice(0,3);
+    for (const b of bc)for(const c of cru){if(b.cp+c.cp<=limit)seeds.push({indices:[b.index,c.index],excludeCapitals:false});}
+    const topFront=entries.filter(x=>x.ship.row==='Front'&&x.cp<=limit)
+      .sort((a,b)=>b.unitPower/b.cp-a.unitPower/a.cp).slice(0,2);
+    topFront.forEach(x=>seeds.push({indices:[x.index],excludeCapitals:false}));
+    const plans=seeds.map(x=>assemble(x.indices,x.excludeCapitals));
+    plans.sort((a,b)=>b.metrics.score-a.metrics.score || b.metrics.spent-a.metrics.spent);
+    const plan=plans[0] || assemble();
+    const counts=plan.counts;
+    const hulls=entries.map((item,i)=>({ship:item.ship,qty:counts[i]})).filter(x=>x.qty>0);
+    const capacity=plan.metrics.capacity;
     let fighters=capacity.f,large=capacity.l,corvettes=capacity.c;
-    let assignments=[];
-    const fighterPool=availableAir.filter(s=>s.type==='Fighter').sort((a,b)=>{
-      if(a.size!==b.size)return a.size==='Large'?-1:1;return shipScore(b,state.settings)-shipScore(a,state.settings);
-    });
+    const assignments=[];
+    // Large fighters require both general fighter and large-fighter slots.
+    const fighterPool=availableAir.filter(s=>s.type==='Fighter').sort((a,b)=>
+      (a.size==='Large'?0:1)-(b.size==='Large'?0:1) ||
+      shipScore(b,{...settings,strategy:mode})-shipScore(a,{...settings,strategy:mode}));
     for(const ship of fighterPool){
-      let count=ship.size==='Large'?Math.min(ship.qty,fighters,large):Math.min(ship.qty,fighters);
-      if(count>0){assignments.push({ship,qty:count});fighters-=count;if(ship.size==='Large')large-=count;}
+      const qty=ship.size==='Large'?Math.min(ship.qty,fighters,large):Math.min(ship.qty,fighters);
+      if(qty<=0)continue;
+      assignments.push({ship,qty});fighters-=qty;
+      if(ship.size==='Large')large-=qty;
     }
-    const corvettePool=availableAir.filter(s=>s.type==='Corvette').sort((a,b)=>shipScore(b,state.settings)-shipScore(a,state.settings));
-    for(const ship of corvettePool){const count=Math.min(ship.qty,corvettes);if(count>0){assignments.push({ship,qty:count});corvettes-=count;}}
-    return {limit,spent,hulls,assignments,capacity,owned,nonAir,availableAir,missingAircraft:availableAir.reduce((n,s)=>n+s.qty,0)-assignments.reduce((n,a)=>n+a.qty,0)};
+    const corvettePool=availableAir.filter(s=>s.type==='Corvette').sort((a,b)=>
+      shipScore(b,{...settings,strategy:mode})-shipScore(a,{...settings,strategy:mode}));
+    for(const ship of corvettePool){
+      const qty=Math.min(ship.qty,corvettes);
+      if(qty>0){assignments.push({ship,qty});corvettes-=qty;}
+    }
+    const spent=plan.metrics.spent;
+    const chosenCapital=hulls.filter(x=>x.ship.type==='Cruiser'||x.ship.type==='Battlecruiser');
+    const omittedCapital=primaryCapital.filter(x=>!chosenCapital.some(y=>y.ship.id===x.ship.id));
+    const selectionNotes=[];
+    if(chosenCapital.length){
+      selectionNotes.push('Capital-ship core: '+chosenCapital.map(x=>`${x.qty} × ${x.ship.name} (${x.ship.type})`).join(', ')+'.');
+    }else if(primaryCapital.length){
+      selectionNotes.push('Cruisers and battlecruisers were evaluated, but no heavy-ship candidate improved the current heuristic formation.');
+    }else{
+      selectionNotes.push('No owned, buildable cruiser or battlecruiser was available within this CP limit.');
+    }
+    if(omittedCapital.length){
+      selectionNotes.push('Other available heavy ships not selected: '+omittedCapital.slice(0,3).map(x=>x.ship.name+' ('+x.ship.variant+')').join(', ')+'.');
+    }
+    const frontPct=spent?Math.round(100*plan.metrics.frontCp/spent):0;
+    selectionNotes.push(`Frontline allocation: ${frontPct}% of used CP. Aircraft loaded: ${assignments.reduce((n,x)=>n+x.qty,0)}.`);
+    selectionNotes.push(`${plans.length} candidate formations compared using estimated class-aware power, ship diversity, protection and aircraft capacity. Not a battle simulator.`);
+    return {limit,spent,hulls,assignments,capacity,owned,nonAir,availableAir,
+      missingAircraft:Math.max(0,availableAir.reduce((n,s)=>n+s.qty,0)-assignments.reduce((n,a)=>n+a.qty,0)),
+      selectionNotes,candidateCount:plans.length,estimatedScore:Math.round(plan.metrics.score*10)/10};
   }
+  function buildFleet(){ return optimizedBuildFleet(state, shipScore); }
+
   function totals(fleet){
     const ts={atk:0,tank:0,aa:0,support:0};
     for(const {ship,qty} of [...fleet.hulls,...fleet.assignments])for(const key of Object.keys(ts))ts[key]+=ship[key]*qty*(isAir(ship)?.7:1);
@@ -379,7 +491,7 @@
     const front=fleet.hulls.filter(x=>x.ship.row==='Front').reduce((n,x)=>n+x.qty,0);
     const back=fleet.hulls.filter(x=>x.ship.row==='Back').reduce((n,x)=>n+x.qty,0);
     if(!fleet.owned.length) return [{level:'warning',message:'No owned blueprints selected. Visit My Blueprints to choose your ships.'}];
-    if(!totalHull) return [{level:'danger',message:'No deployable hulls fit the CP limit. Check CP values and available copies.'}];
+    if(!totalHull) return [{level:'danger',message:'No deployable hulls fit the CP limit. Check CP values and available ships.'}];
     if(front===0)notes.push({level:'warning',message:'No front-row hulls. Direct-fire threats may reach your middle and back rows sooner.'});
     else notes.push({level:'ok',message:`Front line: ${front} hull${front===1?'':'s'} available to absorb incoming direct-fire pressure.`});
     if(state.settings.airThreat){
@@ -405,7 +517,9 @@
   }
   function renderReadouts(fleet){
     const notes=diagnostics(fleet);
-    $('#readouts').innerHTML=notes.map(x=>`<div class="readout ${x.level==='ok'?'':esc(x.level)}"><span class="readout-icon">${x.level==='ok'?'✓':x.level==='danger'?'✕':x.level==='warning'?'⚠':'ⓘ'}</span><span>${esc(x.message)}</span></div>`).join('');
+    const selectionNotes=Array.isArray(fleet.selectionNotes)?fleet.selectionNotes:[];
+    const why=selectionNotes.length?'<div class="readout"><strong>Why this fleet?</strong></div>'+selectionNotes.map(message=>'<div class="readout info"><span class="readout-icon">ⓘ</span><span>'+esc(message)+'</span></div>').join(''):'';
+    $('#readouts').innerHTML=why+notes.map(x=>`<div class="readout ${x.level==='ok'?'':esc(x.level)}"><span class="readout-icon">${x.level==='ok'?'✓':x.level==='danger'?'✕':x.level==='warning'?'⚠':'ⓘ'}</span><span>${esc(x.message)}</span></div>`).join('');
     const t=totals(fleet);
     const highest=Math.max(1,...Object.values(t));
     $('#role-bars').innerHTML=[['atk','Attack'],['tank','Defense'],['aa','Anti-air'],['support','Support']].map(([key,label])=>`<div class="role-item"><div><span>${label}</span><strong>${Math.round(t[key])} pts</strong></div><div class="role-track"><span style="width:${t[key]/highest*100}%"></span></div></div>`).join('');
