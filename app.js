@@ -6,16 +6,244 @@
   const AIR_TYPES = new Set(['Fighter', 'Corvette']);
   const TYPES = ['Frigate','Destroyer','Cruiser','Battlecruiser','Carrier','Fighter','Corvette'];
   const ROWS = ['Front','Middle','Back','Aircraft'];
-  // Published maximum ship counts, not the player's live base availability.
-  // Only documented models are included; other entries remain estimates.
-  const PUBLISHED_SERVICE_LIMITS = Object.freeze({
-    'AC721': 15,
-    'Ceres': 10,
-    'Taurus': 10,
-    'Eris I': 10,
-    'Winged Hussar': 10
-  });
-  const publishedServiceLimit = ship => Object.prototype.hasOwnProperty.call(PUBLISHED_SERVICE_LIMITS,ship.name) ? PUBLISHED_SERVICE_LIMITS[ship.name] : null;
+  // Variant-specific community-reported ACTIVE-SERVICE limits (research 2026-11-01).
+  // The official game differentiates variants; do not assume ship class or model caps.
+  // Missing limits remain unverified. These are NOT live buildable quantities.
+  const PUBLISHED_VARIANT_LIMIT_RULES = {
+  "AC721": {
+    "max": 15,
+    "url": "https://infinite-lagrange.fandom.com/wiki/AC721",
+    "variants": [
+      "Aircraft Type",
+      "Heavy Missile Destroyer",
+      "Heavy Logistics Destroyer",
+      "Heavy Ion Cannon Destroyer (temporary)"
+    ]
+  },
+  "Ceres": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Ceres",
+    "variants": [
+      "Aircraft Destroyer",
+      "Support Destroyer",
+      "Tactical Destroyer"
+    ]
+  },
+  "Taurus": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Taurus",
+    "variants": [
+      "Pulse Cannon",
+      "Defensive Destroyer",
+      "Assault Destroyer"
+    ]
+  },
+  "Eris I": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Eris_I",
+    "variants": [
+      "Maneuver Assault",
+      "Armored Destroyer",
+      "Heavy Cannon Destroyer"
+    ]
+  },
+  "Winged Hussar": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Winged_Hussar",
+    "variants": [
+      "Light Missile",
+      "Area-Denial Anti-Aircraft Destroyer",
+      "Integrated Missile Destroyer"
+    ]
+  },
+  "XenoStinger": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/XenoStinger",
+    "variants": [
+      "Special",
+      "Anti-Aircraft Frigate"
+    ]
+  },
+  "FG300": {
+    "max": 15,
+    "url": "https://infinite-lagrange.fandom.com/wiki/FG300",
+    "variants": [
+      "Armored",
+      "Multi-role"
+    ]
+  },
+  "Ruby": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Ruby",
+    "variants": [
+      "Railgun",
+      "Experimental Ion Cannon Frigate",
+      "Heavy Defensive Frigate"
+    ]
+  },
+  "NOMA M470": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/NOMA_M470",
+    "variants": [
+      "Support",
+      "Anti-Aircraft Frigate",
+      "Heavy Landing Ship"
+    ]
+  },
+  "Tundra": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Tundra",
+    "variants": [
+      "Tactical",
+      "Aircraft Destroyer"
+    ]
+  },
+  "Guardian": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Guardian",
+    "variants": [
+      "Support",
+      "Dual-Purpose Assault Ship",
+      "Experimental Pulse Assault Ship"
+    ]
+  },
+  "Carilion": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Carilion",
+    "variants": [
+      "Special / Recon",
+      "Heavy Cannon Frigate",
+      "Special Frigate"
+    ]
+  },
+  "Quaoar": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Quaoar",
+    "variants": [
+      "Railgun Destroyer",
+      "Torpedo Destroyer"
+    ]
+  },
+  "CAS066": {
+    "max": 12,
+    "url": "https://infinite-lagrange.fandom.com/wiki/CAS066",
+    "variants": [
+      "Auxiliary Cruiser",
+      "Aircraft Cruiser",
+      "Artillery Cruiser"
+    ]
+  },
+  "Predator": {
+    "max": 8,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Predator",
+    "variants": [
+      "Anti-Aircraft Cruiser",
+      "Tactical Aircraft Cruiser"
+    ]
+  },
+  "Jaeger": {
+    "max": 8,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Jaeger",
+    "variants": [
+      "Heavy Aircraft Cruiser",
+      "Heavy Cannon Cruiser"
+    ]
+  },
+  "CV3000": {
+    "max": 5,
+    "url": "https://infinite-lagrange.fandom.com/wiki/CV3000_-_High-Speed_Carrier",
+    "variants": [
+      "High-Speed Carrier"
+    ]
+  },
+  "Solar Whale": {
+    "max": 5,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Solar_Whale_-_Armed_Tactical_Carrier",
+    "variants": [
+      "Armed Tactical Carrier"
+    ]
+  },
+  "Constantine the Great": {
+    "max": 6,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Constantine_the_Great_-_Multi-Role_Battlecruiser",
+    "variants": [
+      "Battlecruiser"
+    ]
+  },
+  "Shield of Plutus": {
+    "max": 6,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Shield_of_Plutus_-_Defense_Battlecruiser",
+    "variants": [
+      "Battlecruiser"
+    ]
+  },
+  "RedBeast 7-13": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/RedBeast_7-13",
+    "variants": [
+      "Missile Corvette"
+    ]
+  },
+  "Mistral": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Mistral_-_Combat_Attacker",
+    "variants": [
+      "Anti-Air Fighter"
+    ]
+  },
+  "Stingray": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Stingray_-_Torpedo_Bomber",
+    "variants": [
+      "Torpedo Bomber"
+    ]
+  },
+  "Sandrake": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Sandrake_-_Atmospheric_Interceptor",
+    "variants": [
+      "Atmospheric Interceptor"
+    ]
+  },
+  "AT021": {
+    "max": 15,
+    "url": "https://infinite-lagrange.fandom.com/wiki/AT021",
+    "variants": [
+      "Pulse Attacker"
+    ]
+  },
+  "BR050": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/BR050",
+    "variants": [
+      "Torpedo Type"
+    ]
+  },
+  "Reliat": {
+    "max": 10,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Reliat",
+    "variants": [
+      "Tactical Torpedo Frigate",
+      "Stealth Frigate"
+    ]
+  },
+  "Ranger": {
+    "max": 8,
+    "url": "https://infinite-lagrange.fandom.com/wiki/Ranger",
+    "variants": [
+      "Comprehensive Warfare Cruiser"
+    ]
+  }
+};
+  const VARIANT_SERVICE_LIMITS = new Map((window.FLEET_STARTERS || []).map(ship => {
+    const rule = PUBLISHED_VARIANT_LIMIT_RULES[ship.name];
+    const verified = rule && rule.variants.includes(ship.variant);
+    return [ship.id, verified
+      ? {max: rule.max, status: 'community-documented', url: rule.url}
+      : {max: null, status: 'unverified', url: null}];
+  }));
+  const limitInfo = ship => VARIANT_SERVICE_LIMITS.get(ship.id) || {max: null, status: 'unverified', url: null};
+  const publishedServiceLimit = ship => limitInfo(ship).max;
   const suggestedQuantity = ship => publishedServiceLimit(ship) ?? int(ship.qty,1,0,99);
   const CONFIG = {
     offensive: {label:'OFFENSIVE STRIKE', w:{atk:5,tank:1.35,aa:1.15,support:.7}},
@@ -222,7 +450,7 @@
       <div class="inventory-detail-body" id="inventory-body-${esc(s.id)}" ${open?'':'hidden'}>
         <div class="ship-metrics" aria-label="Stats for ${esc(shipName(s))}">
           ${measures.map(([label,value])=>`<div class="ship-metric"><small>${label}</small><strong>${esc(value)}</strong></div>`).join('')}
-          <div class="ship-metric quantity-metric"><label for="quantity-${esc(s.id)}">Available ships</label><input id="quantity-${esc(s.id)}" type="number" min="0" max="99" value="${s.qty}" data-quantity-id="${esc(s.id)}">${serviceLimit==null?`<small>Planning estimate. Verify the number in your game.</small>`:`<small>Published maximum in service: ${serviceLimit} (not live base count)</small><button type="button" class="inventory-expand-button" data-apply-limit-id="${esc(s.id)}">Use ${serviceLimit}</button>`}</div>
+          <div class="ship-metric quantity-metric"><label for="quantity-${esc(s.id)}">Available ships</label><input id="quantity-${esc(s.id)}" type="number" min="0" max="99" value="${s.qty}" data-quantity-id="${esc(s.id)}">${serviceLimit==null?`<small>Limit unverified. This editable quantity is only a planning estimate.</small>`:`<small>Community-documented max in service: ${serviceLimit} (not live buildable count) · <a href="${esc(limitInfo(s).url)}" target="_blank" rel="noopener noreferrer">Source</a></small><button type="button" class="inventory-expand-button" data-apply-limit-id="${esc(s.id)}">Use ${serviceLimit}</button>`}</div>
         </div>
         ${s.notes?`<p class="ship-note">${esc(s.notes)}</p>`:''}
         <p class="stats-caveat">Role ratings are planning estimates, not verified game statistics.</p>
@@ -314,6 +542,11 @@
   }
   function renderGuide(){
     $('#reference-links').innerHTML=(window.FLEET_REFERENCES||[]).map(s=>`<a href="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.title)} ↗</a>`).join('');
+    const audited=blueprintCatalog.map(limitInfo);
+    const covered=audited.filter(r=>r.max!=null).length;
+    let audit=$('#limit-coverage');
+    if(!audit){audit=document.createElement('p');audit.id='limit-coverage';$('#reference-links').insertAdjacentElement('afterend',audit);}
+    audit.textContent=`Service limits: ${covered} of ${audited.length} variants community-documented; ${audited.length-covered} unverified. Existing custom quantities are preserved.`;
   }
   function renderSettings(){
     $('#cp-limit').value=state.settings.cp;
@@ -354,7 +587,7 @@
     $('#catalog-copies').value=existing?existing.qty:suggestedQuantity(s);
     $('#catalog-owned').checked=true;
     $('#catalog-preview').innerHTML=`<strong>${esc(shipName(s))}</strong><div class="catalog-preview-facts"><span>${esc(s.type)}</span><span>${esc(s.row)} row</span><span>CP ${s.cp}</span><span>Attack ${s.atk}/5</span><span>Defense ${s.tank}/5</span><span>AA ${s.aa}/5</span><span>Support ${s.support}/5</span><span>Fighter slots ${s.fighterSlots}</span><span>Corvette slots ${s.corvetteSlots}</span></div><small>${existing?'Already in workspace: preserves your custom stats.':'Stats loaded from built-in catalog.'} Ratings are estimates, not official game values.</small>`;
-    $('#catalog-preview').insertAdjacentHTML('beforeend', serviceLimit==null?'<p class="stats-caveat">Available ships is an editable planning estimate. Confirm the number your base can build.</p>':`<p class="stats-caveat">Published maximum in service: <b>${serviceLimit}</b>. Not your live available-to-build count. <button type="button" class="inventory-expand-button" data-use-catalog-limit>Use ${serviceLimit}</button></p>`);
+    $('#catalog-preview').insertAdjacentHTML('beforeend', serviceLimit==null?'<p class="stats-caveat">Available ships is an editable planning estimate. Confirm the number your base can build.</p>':`<p class="stats-caveat">Community-documented maximum in service: <b>${serviceLimit}</b> <a href="${esc(limitInfo(s).url)}" target="_blank" rel="noopener noreferrer">Source</a>. Not your live available-to-build count. <button type="button" class="inventory-expand-button" data-use-catalog-limit>Use ${serviceLimit}</button></p>`);
   }
   function showEditor(){
     populateCatalogShips();
